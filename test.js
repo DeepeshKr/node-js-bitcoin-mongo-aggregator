@@ -1,5 +1,10 @@
 // request is a module that makes http calls easier
 const request = require('request');
+const redis = require('redis');
+
+const MongoClient = require('mongodb').MongoClient;
+
+const dsn = 'mongodb://localhost:37017/maxcoin' 
 
 // Generic function that fetches the closing bitcoin dates of the last month from a public API
 function fetchFromAPI(callback) {
@@ -11,7 +16,76 @@ function fetchFromAPI(callback) {
     });
 }
 
-fetchFromAPI((err, data) => {
+function insertMongodb(collection, data) {
+    const promisedInserts= [];
+
+    Object.keys(data).forEach((key) => {
+        promisedInserts.push(
+            collection.insertOne({date: key, value: data[key]})
+        );
+    });
+    return Promise.all(promisedInserts);
+}
+
+
+MongoClient.connect(dsn, (err, db) => {
+    console.time('mongodb')
     if (err) throw err;
-    console.log(data);
+    console.log('Connected sucuesfully to MongoDB server');
+    fetchFromAPI((err, data) => {
+        if (err) throw err;
+        // console.log(`database collection: ${db.collection}`);
+        const collection = db.collection('value');
+
+        insertMongodb(collection, data.bpi)
+        .then((result) => {
+            console.log(`succesfully inserted ${result.length} documents into MongoDb`)
+
+            const options = {'sort': [['value', 'desc']]};
+
+            collection.findOne({}, options, (err, doc) => {
+                if (err) throw err;
+                console.log(`Mongo DB: the one month max value is ${doc.value} and it was reached on ${doc.date}`)
+                console.timeEnd('mongodb');
+                db.close();
+            });
+            
+        })
+        .catch((err) => {
+            console.log(err);
+            process.exit();
+        })
+
+        
+    });
 });
+
+function insertRedis(client, data, callback) {
+    const values = ['values'];
+
+    Object.keys(data).forEach((key) => {
+        values.push(data[key]);
+        values.push(key);
+    });
+    client.zadd(values, callback);
+}
+const redisClient = redis.createClient(6379);
+redisClient.on('connect', () => {
+    console.time('redis');
+    console.log('Sucessfully connected to redis');
+
+    fetchFromAPI((err, data) => {
+        if (err) throw err;
+
+        insertRedis(redisClient, data.bpi, (err, results) => {
+            console.log(`Successfully inserted ${results} key/value pairs into redis`);
+
+            redisClient.zrange('values', -1, -1, 'withscores', (err, result) => {
+                if (err) throw err;
+                console.log(`Redis: The one month max value is ${result[1]} and was reached on ${result[0]}`)
+                console.timeEnd('redis');
+                redisClient.end();
+            });
+        })
+    })
+})
